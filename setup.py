@@ -6,10 +6,17 @@ def open_file(fname):
 
 setup(
 	name='nltk-trainer',
-	packages=['nltk_trainer'],
+	packages=[
+		'nltk_trainer',
+		'nltk_trainer.chunking',
+		'nltk_trainer.classification',
+		'nltk_trainer.featx',
+		'nltk_trainer.tagging',
+		'nltk_trainer.writer'
+	],
 	version='0.9',
 	description='Train NLTK objects with 0 code',
-	long_description=open_file('README.txt').read(),
+	long_description=open_file('README.rst').read(),
 	license='Apache',
 	author='Jacob Perkins',
 	author_email='japerk@gmail.com',

@@ -1,39 +1,40 @@
-import itertools
-import nltk.chunk, nltk.tag
+import nltk.tag
+from nltk.chunk import ChunkParserI
+from nltk.chunk.util import conlltags2tree, tree2conlltags
 from nltk.tag import UnigramTagger, BigramTagger, ClassifierBasedTagger
+from .transforms import node_label
 
 #####################
 ## tree conversion ##
 #####################
 
 def chunk_trees2train_chunks(chunk_sents):
-	tag_sents = [nltk.chunk.tree2conlltags(sent) for sent in chunk_sents]
+	tag_sents = [tree2conlltags(sent) for sent in chunk_sents]
 	return [[((w,t),c) for (w,t,c) in sent] for sent in tag_sents]
 
 def conll_tag_chunks(chunk_sents):
 	'''Convert each chunked sentence to list of (tag, chunk_tag) tuples,
 	so the final result is a list of lists of (tag, chunk_tag) tuples.
-	>>> import nltk.chunk
 	>>> from nltk.tree import Tree
 	>>> t = Tree('S', [Tree('NP', [('the', 'DT'), ('book', 'NN')])])
 	>>> conll_tag_chunks([t])
 	[[('DT', 'B-NP'), ('NN', 'I-NP')]]
 	'''
-	tagged_sents = [nltk.chunk.tree2conlltags(tree) for tree in chunk_sents]
+	tagged_sents = [tree2conlltags(tree) for tree in chunk_sents]
 	return [[(t, c) for (w, t, c) in sent] for sent in tagged_sents]
 
 def ieertree2conlltags(tree, tag=nltk.tag.pos_tag):
-	# tree.pos() flattens the tree and produces [(word, node)] where node is
-	# from the word's parent tree node. words in a chunk therefore get the
+	# tree.pos() flattens the tree and produces [(word, label)] where label is
+	# from the word's parent tree label. words in a chunk therefore get the
 	# chunk tag, while words outside a chunk get the same tag as the tree's
-	# top node
+	# top label
 	words, ents = zip(*tree.pos())
 	iobs = []
 	prev = None
 	# construct iob tags from entity names
 	for ent in ents:
-		# any entity that is the same as the tree's top node is outside a chunk
-		if ent == tree.node:
+		# any entity that is the same as the tree's top label is outside a chunk
+		if ent == node_label(tree):
 			iobs.append('O')
 			prev = None
 		# have a previous entity that is equal so this is inside the chunk
@@ -46,13 +47,13 @@ def ieertree2conlltags(tree, tag=nltk.tag.pos_tag):
 			prev = ent
 	# get tags for each word, then construct 3-tuple for conll tags
 	words, tags = zip(*tag(words))
-	return itertools.izip(words, tags, iobs)
+	return zip(words, tags, iobs)
 
 #################
 ## tag chunker ##
 #################
 
-class TagChunker(nltk.chunk.ChunkParserI):
+class TagChunker(ChunkParserI):
 	'''Chunks tagged tokens using Ngram Tagging.'''
 	def __init__(self, train_chunks, tagger_classes=[UnigramTagger, BigramTagger]):
 		'''Train Ngram taggers on chunked sentences'''
@@ -68,8 +69,7 @@ class TagChunker(nltk.chunk.ChunkParserI):
 		(words, tags) = zip(*tagged_sent)
 		chunks = self.tagger.tag(tags)
 		# create conll str for tree parsing
-		wtc = itertools.izip(words, chunks)
-		return nltk.chunk.conlltags2tree([(w,t,c) for (w,(t,c)) in wtc])
+		return conlltags2tree([(w,t,c) for (w,(t,c)) in zip(words, chunks)])
 
 ########################
 ## classifier chunker ##
@@ -101,7 +101,7 @@ def prev_next_pos_iob(tokens, index, history):
 	
 	return feats
 
-class ClassifierChunker(nltk.chunk.ChunkParserI):
+class ClassifierChunker(ChunkParserI):
 	def __init__(self, train_sents, feature_detector=prev_next_pos_iob, **kwargs):
 		if not feature_detector:
 			feature_detector = self.feature_detector
@@ -113,4 +113,19 @@ class ClassifierChunker(nltk.chunk.ChunkParserI):
 	def parse(self, tagged_sent):
 		if not tagged_sent: return None
 		chunks = self.tagger.tag(tagged_sent)
-		return nltk.chunk.conlltags2tree([(w,t,c) for ((w,t),c) in chunks])
+		return conlltags2tree([(w,t,c) for ((w,t),c) in chunks])
+
+#############
+## pattern ##
+#############
+
+class PatternChunker(ChunkParserI):
+	def parse(self, tagged_sent):
+		# don't import at top since don't want to fail if not installed
+		from pattern.en import parse
+		s = ' '.join([word for word, tag in tagged_sent])
+		# not tokenizing ensures that the number of tagged tokens returned is
+		# the same as the number of input tokens
+		sents = parse(s, tokenize=False).split()
+		if not sents: return None
+		return conlltags2tree([(w, t, c) for w, t, c, p in sents[0]])

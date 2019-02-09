@@ -1,10 +1,9 @@
-#!/usr/bin/python
+#!/usr/bin/env python
 import argparse, collections, math, os.path
 import nltk.corpus, nltk.corpus.reader, nltk.data, nltk.tag, nltk.metrics
 from nltk.corpus.util import LazyCorpusLoader
-from nltk.probability import FreqDist
-from nltk.tag.simplify import simplify_wsj_tag
-from nltk_trainer import load_corpus_reader
+from nltk_trainer import load_corpus_reader, load_model, simplify_wsj_tag
+from nltk_trainer.tagging import taggers
 
 ########################################
 ## command options & argument parsing ##
@@ -33,8 +32,13 @@ corpus_group.add_argument('--fileids', default=None,
 	help='Specify fileids to load from corpus')
 corpus_group.add_argument('--fraction', default=1.0, type=float,
 	help='''The fraction of the corpus to use for testing coverage''')
-corpus_group.add_argument('--simplify_tags', action='store_true', default=False,
-	help='Use simplified tags. Requires the --metrics option.')
+
+if simplify_wsj_tag:
+	corpus_group.add_argument('--simplify_tags', action='store_true', default=False,
+		help='Use simplified tags')
+else:
+	corpus_group.add_argument('--tagset', default=None,
+		help='Map tags to a given tagset, such as "universal"')
 
 args = parser.parse_args()
 
@@ -46,10 +50,14 @@ corpus = load_corpus_reader(args.corpus, reader=args.reader, fileids=args.fileid
 
 kwargs = {'fileids': args.fileids}
 
-if args.simplify_tags and not args.metrics:
+if simplify_wsj_tag and args.simplify_tags and not args.metrics:
 	raise ValueError('simplify_tags can only be used with the --metrics option')
-elif args.simplify_tags and args.corpus not in ['conll2000', 'switchboard']:
+elif simplify_wsj_tag and args.simplify_tags and args.corpus not in ['conll2000', 'switchboard']:
 	kwargs['simplify_tags'] = True
+elif not simplify_wsj_tag and args.tagset and not args.metrics:
+	raise ValueError('tagset can only be used with the --metrics option')
+elif not simplify_wsj_tag and args.tagset:
+	kwargs['tagset'] = args.tagset
 
 # TODO: support corpora with alternatives to tagged_sents that work just as well
 if args.metrics and not hasattr(corpus, 'tagged_sents'):
@@ -60,30 +68,25 @@ if args.metrics and not hasattr(corpus, 'tagged_sents'):
 ############
 
 if args.trace:
-	print 'loading tagger %s' % args.tagger
+	print('loading tagger %s' % args.tagger)
 
-try:
-	tagger = nltk.data.load(args.tagger)
-except LookupError:
-	try:
-		import cPickle as pickle
-	except ImportError:
-		import pickle
-	
-	tagger = pickle.load(open(os.path.expanduser(args.tagger)))
+if args.tagger == 'pattern':
+	tagger = taggers.PatternTagger()
+else:
+	tagger = load_model(args.tagger)
 
 #######################
 ## coverage analysis ##
 #######################
 
 if args.trace:
-	print 'analyzing tag coverage of %s with %s\n' % (args.corpus, tagger.__class__.__name__)
+	print('analyzing tag coverage of %s with %s\n' % (args.corpus, tagger.__class__.__name__))
 
-tags_found = FreqDist()
+tags_found = collections.defaultdict(int)
 unknown_words = set()
 
 if args.metrics:
-	tags_actual = FreqDist()
+	tags_actual = collections.defaultdict(int)
 	tag_refs = []
 	tag_test = []
 	tag_word_refs = collections.defaultdict(set)
@@ -97,7 +100,7 @@ if args.metrics:
 	
 	for tagged_sent in tagged_sents:
 		for word, tag in tagged_sent:
-			tags_actual.inc(tag)
+			tags_actual[tag] += 1
 			tag_refs.append(tag)
 			tag_word_refs[tag].add(word)
 			
@@ -105,33 +108,33 @@ if args.metrics:
 				taglen = len(tag)
 		
 		for word, tag in tagger.tag(nltk.tag.untag(tagged_sent)):
-			tags_found.inc(tag)
+			tags_found[tag] += 1
 			tag_test.append(tag)
 			tag_word_test[tag].add(word)
 			
 			if tag == '-NONE-':
 				unknown_words.add(word)
 	
-	print 'Accuracy: %f' % nltk.metrics.accuracy(tag_refs, tag_test)
-	print 'Unknown words: %d' % len(unknown_words)
+	print('Accuracy: %f' % nltk.metrics.accuracy(tag_refs, tag_test))
+	print('Unknown words: %d' % len(unknown_words))
 	
 	if args.trace and unknown_words:
-		print ', '.join(sorted(unknown_words))
+		print(', '.join(sorted(unknown_words)))
 	
-	print ''
-	print '  '.join(['Tag'.center(taglen), 'Found'.center(9), 'Actual'.center(10),
-					'Precision'.center(13), 'Recall'.center(13)])
-	print '  '.join(['='*taglen, '='*9, '='*10, '='*13, '='*13])
+	print('')
+	print('  '.join(['Tag'.center(taglen), 'Found'.center(9), 'Actual'.center(10),
+					'Precision'.center(13), 'Recall'.center(13)]))
+	print('  '.join(['='*taglen, '='*9, '='*10, '='*13, '='*13]))
 	
 	for tag in sorted(set(tags_found.keys()) | set(tags_actual.keys())):
 		found = tags_found[tag]
 		actual = tags_actual[tag]
 		precision = nltk.metrics.precision(tag_word_refs[tag], tag_word_test[tag])
 		recall = nltk.metrics.recall(tag_word_refs[tag], tag_word_test[tag])
-		print '  '.join([tag.ljust(taglen), str(found).rjust(9), str(actual).rjust(10),
-			str(precision).ljust(13)[:13], str(recall).ljust(13)[:13]])
+		print('  '.join([tag.ljust(taglen), str(found).rjust(9), str(actual).rjust(10),
+			str(precision).ljust(13)[:13], str(recall).ljust(13)[:13]]))
 	
-	print '  '.join(['='*taglen, '='*9, '='*10, '='*13, '='*13])
+	print('  '.join(['='*taglen, '='*9, '='*10, '='*13, '='*13]))
 else:
 	sents = corpus.sents(**kwargs)
 	taglen = 7
@@ -142,15 +145,15 @@ else:
 	
 	for sent in sents:
 		for word, tag in tagger.tag(sent):
-			tags_found.inc(tag)
+			tags_found[tag] += 1
 			
 			if len(tag) > taglen:
 				taglen = len(tag)
 	
-	print '  '.join(['Tag'.center(taglen), 'Count'.center(9)])
-	print '  '.join(['='*taglen, '='*9])
+	print('  '.join(['Tag'.center(taglen), 'Count'.center(9)]))
+	print('  '.join(['='*taglen, '='*9]))
 	
-	for tag in sorted(tags_found.samples()):
-		print '  '.join([tag.ljust(taglen), str(tags_found[tag]).rjust(9)])
+	for tag in sorted(tags_found.keys()):
+		print('  '.join([tag.ljust(taglen), str(tags_found[tag]).rjust(9)]))
 	
-	print '  '.join(['='*taglen, '='*9])
+	print('  '.join(['='*taglen, '='*9]))

@@ -1,11 +1,11 @@
-#!/usr/bin/python
-import argparse, collections, itertools, operator, re, string
+#!/usr/bin/env python
+import argparse, collections, functools, itertools, operator, re, string, time
 import nltk.data
 from nltk.classify.util import accuracy
 from nltk.corpus import stopwords
 from nltk.metrics import f_measure, precision, recall
 from nltk.util import ngrams
-from nltk_trainer import load_corpus_reader
+from nltk_trainer import load_corpus_reader, pickle, simplify_wsj_tag
 from nltk_trainer.classification import corpus, scoring
 from nltk_trainer.classification.featx import bag_of_words
 
@@ -21,6 +21,8 @@ parser.add_argument('--trace', default=1, type=int,
 	help='How much trace output you want, defaults to 1. 0 is no trace output.')
 parser.add_argument('--metrics', action='store_true', default=False,
 	help='Use classified instances to determine classifier accuracy, precision & recall')
+parser.add_argument('--speed', action='store_true', default=False,
+	help='Determine average instance classification speed.')
 
 corpus_group = parser.add_argument_group('Corpus Reader Options')
 corpus_group.add_argument('--reader',
@@ -45,7 +47,7 @@ corpus_group.add_argument('--fraction', default=1.0, type=float,
 
 feat_group = parser.add_argument_group('Feature Extraction',
 	'The default is to lowercase every word, strip punctuation, and use stopwords')
-feat_group.add_argument('--ngrams', action='append', type=int,
+feat_group.add_argument('--ngrams', nargs='+', type=int,
 	help='use n-grams as features.')
 feat_group.add_argument('--no-lowercase', action='store_true', default=False,
 	help="don't lowercase every word")
@@ -104,8 +106,12 @@ def norm_words(words):
 	if stopset:
 		words = [w for w in words if w.lower() not in stopset]
 
+	# in case we modified words in a generator, ensure it's a list so we can add together
+	if not isinstance(words, list):
+		words = list(words)
+
 	if args.ngrams:
-		return reduce(operator.add, [words if n == 1 else ngrams(words, n) for n in args.ngrams])
+		return functools.reduce(operator.add, [words if n == 1 else list(ngrams(words, n)) for n in args.ngrams])
 	else:
 		return words
 
@@ -113,7 +119,17 @@ def norm_words(words):
 ## text extraction ##
 #####################
 
-classifier = nltk.data.load(args.classifier)
+if args.speed:
+	load_start = time.time()
+
+try:
+	classifier = nltk.data.load(args.classifier)
+except LookupError:
+	classifier = pickle.load(open(args.classifier))
+
+if args.speed:
+	load_secs = time.time() - load_start
+	print('loading time: %dsecs' % load_secs)
 
 if args.metrics:
 	label_instance_function = {
@@ -127,39 +143,59 @@ if args.metrics:
 	test_feats = []
 	
 	for label in labels:
-		texts = list(lif(categorized_corpus, label))
-		stop = int(len(texts)*args.fraction)
+		texts = lif(categorized_corpus, label)
 		
-		for t in texts[:stop]:
+		if args.instances == 'files':
+			# don't get list(texts) here since might have tons of files
+			stop = int(len(categorized_corpus.fileids())*args.fraction)
+		else:
+			texts = list(texts)
+			stop = int(len(texts)*args.fraction)
+		
+		for t in itertools.islice(texts, stop):
 			feat = bag_of_words(norm_words(t))
 			feats.append(feat)
 			test_feats.append((feat, label))
 	
-	print 'accuracy:', accuracy(classifier, test_feats)
+	print('accuracy:', accuracy(classifier, test_feats))
 	refsets, testsets = scoring.ref_test_sets(classifier, test_feats)
 	
 	for label in labels:
 		ref = refsets[label]
 		test = testsets[label]
-		print '%s precision: %f' % (label, precision(ref, test) or 0)
-		print '%s recall: %f' % (label, recall(ref, test) or 0)
-		print '%s f-measure: %f' % (label, f_measure(ref, test) or 0)
+		print('%s precision: %f' % (label, precision(ref, test) or 0))
+		print('%s recall: %f' % (label, recall(ref, test) or 0))
+		print('%s f-measure: %f' % (label, f_measure(ref, test) or 0))
 else:
-	instance_function = {
-		'sents': categorized_corpus.sents,
-		'paras': lambda: [itertools.chain(*para) for para in categorized_corpus.paras()]
-		# TODO: support files
-	}
+	if args.instances == 'sents':
+		texts = categorized_corpus.sents()
+		total = len(texts)
+	elif args.instances == 'paras':
+		texts = (itertools.chain(*para) for para in categorized_corpus.paras())
+		total = len(categorized_corpus.paras())
+	elif args.instances == 'files':
+		texts = (categorized_corpus.words(fileids=[fid]) for fid in categorized_corpus.fileids())
+		total = len(categorized_corpus.fileids())
 	
-	texts = instance_function[args.instances]()
-	stop = int(len(texts)*args.fraction)
-	feats = [bag_of_words(norm_words(i)) for i in texts[:stop]]
+	stop = int(total * args.fraction)
+	feats = (bag_of_words(norm_words(i)) for i in itertools.islice(texts, stop))
 
 label_counts = collections.defaultdict(int)
+
+if args.speed:
+	time_start = time.time()
 
 for feat in feats:
 	label = classifier.classify(feat)
 	label_counts[label] += 1
 
+if args.speed:
+	time_end = time.time()
+
 for label in sorted(label_counts.keys()):
-	print label, label_counts[label]
+	print(label, label_counts[label])
+
+if args.speed:
+	secs = (time_end - time_start)
+	nfeats = sum(label_counts.values())
+	print('average time per classify: %dsecs / %d feats = %f ms/feat' % (secs, nfeats, (float(secs) / nfeats) * 1000))
